@@ -1,0 +1,17 @@
+# Task Server Configuration
+# Single user task management API
+
+auth:
+  # List of valid bearer tokens for API authentication
+  tokens:
+    - "dev-token-12345"
+    - "dev-token-67890"
+
+database:
+  # Path to SQLite database file (will be created if it doesn't exist)
+  path: "tasks.db"
+
+server:
+  # Server binding configuration
+  host: "0.0.0.0"
+  port: 8000
