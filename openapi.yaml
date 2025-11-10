@@ -1,0 +1,855 @@
+openapi: 3.1.0
+info:
+  title: Task API
+  version: 1.0.0
+  description: |
+    A general purpose Task list API with priorities, tags, dates, descriptions, and flexible metadata.
+    All date-time fields use ISO 8601 format in UTC.
+
+    Semantics:
+    - Null clearing: clients can clear nullable fields on PATCH by sending the key with null.
+    - Completion rules:
+      * When completed is set to true, the server sets completion_date to the current server time in UTC.
+      * When completed is set to false, the server clears completion_date to null.
+      * completion_date is server managed, clients cannot set it directly. If supplied, it is ignored and a 422 may be returned.
+    - Parent filtering default: if parent_id query is omitted on GET /tasks, only root-level tasks are returned, same as parent_id="null".
+    - Tag handling:
+      * Tags are compared in a case-insensitive way and trimmed of surrounding whitespace.
+      * Repeated tag parameters require all listed tags to be present on the task.
+    - Overdue filter: overdue=true returns tasks where due_date < now() and completed=false. It can be combined with due_before and due_after which further narrow results.
+    - Sorting:
+      * Nulls sort last for due_date and title.
+      * Ties break by created_at descending.
+    - Concurrency:
+      * PATCH supports optimistic locking with If-Unmodified-Since and If-Match. If the precondition fails, the server returns 412 Precondition Failed.
+    - Metadata:
+      * Values must be valid JSON types. Suggested total encoded size up to about 10 KB.
+      * The server may enforce limits on property count and nesting.
+
+  contact:
+    name: API Support
+
+servers:
+  - url: /task/v1
+    description: Task API v1
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+      description: A unique key that makes a create or import request idempotent
+
+  schemas:
+    # --- Reusable Component for Common Properties ---
+    TaskBaseProperties:
+      type: object
+      properties:
+        title:
+          type: string
+          description: Task item title
+          minLength: 1
+          maxLength: 500
+        description:
+          type: string
+          description: Detailed description of the task
+          maxLength: 5000
+        completed:
+          type: boolean
+          description: Whether the task is completed
+          default: false
+        archived:
+          type: boolean
+          description: Whether the task is archived
+          default: false
+        priority:
+          type: integer
+          description: Priority level (0=lowest or none, 99=highest)
+          minimum: 0
+          maximum: 99
+          default: 0
+        due_date:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: Due date for the task in UTC. Send null on PATCH to clear.
+        tags:
+          type: array
+          description: Array of tag strings. Can represent projects or contexts. Case-insensitive, trimmed. Max 100 tags.
+          maxItems: 100
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+          examples:
+            - ["work", "urgent", "+project", "@home"]
+        metadata:
+          type: object
+          additionalProperties: true
+          description: |
+            Custom key-value metadata for flexible app-specific data.
+            Values must be JSON types. The server may enforce limits like maxProperties=100 and max depth.
+            Suggested total encoded size up to about 10 KB.
+          examples:
+            - estimated_hours: 4
+              assignee: alice
+              custom_field: value
+        parent_id:
+          type:
+            - string
+            - "null"
+          format: uuid
+          description: ID of parent task for subtasks. Null for root-level tasks. Send null on PATCH to move to root.
+
+    # --- Full Task Model (Response) ---
+    Task:
+      type: object
+      required: [id, title, completed, priority, archived, created_at, updated_at]
+      allOf:
+        - $ref: '#/components/schemas/TaskBaseProperties'
+        - type: object
+          additionalProperties: false
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Unique identifier for the task item
+              readOnly: true
+            completion_date:
+              type:
+                - string
+                - "null"
+              format: date-time
+              description: Date when the task was completed in UTC. Server managed.
+              readOnly: true
+            created_at:
+              type: string
+              format: date-time
+              description: Creation timestamp in UTC
+              readOnly: true
+            updated_at:
+              type: string
+              format: date-time
+              description: Last update timestamp in UTC
+              readOnly: true
+      examples:
+        - id: "c9a1cbd1-4e89-4e2a-8a1f-8f9a6f7d6b1b"
+          title: "Draft Q4 plan"
+          description: "Outline scope and owners"
+          completed: false
+          archived: false
+          priority: 50
+          due_date: "2025-12-01T17:00:00Z"
+          tags: ["work", "planning"]
+          metadata: { estimated_hours: 4, assignee: "alice" }
+          parent_id: null
+          completion_date: null
+          created_at: "2025-11-01T12:00:00Z"
+          updated_at: "2025-11-03T08:30:00Z"
+
+    # --- Task Import Model (Request items for bulk import) ---
+    TaskImport:
+      type: object
+      required: [id, title, completed, priority, archived, created_at, updated_at]
+      allOf:
+        - $ref: '#/components/schemas/TaskBaseProperties'
+        - type: object
+          additionalProperties: false
+          properties:
+            id:
+              type: string
+              format: uuid
+              description: Unique identifier to preserve on import
+            completion_date:
+              type:
+                - string
+                - "null"
+              format: date-time
+              description: Preserved completion timestamp in UTC
+            created_at:
+              type: string
+              format: date-time
+              description: Preserved creation timestamp in UTC
+            updated_at:
+              type: string
+              format: date-time
+              description: Preserved last update timestamp in UTC
+
+    # --- Task Creation Model (Request Body) ---
+    TaskInput:
+      type: object
+      required: [title]
+      allOf:
+        - $ref: '#/components/schemas/TaskBaseProperties'
+        - type: object
+          additionalProperties: false
+          properties: {}
+      description: |
+        Server managed fields like id, created_at, updated_at, and completion_date are ignored if sent and may trigger a 422.
+
+    # --- Task Update Model (Request Body - PATCH) ---
+    TaskUpdate:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/TaskBaseProperties'
+        - type: object
+          additionalProperties: false
+      description: |
+        Partial update. To clear a nullable field, send it as null.
+        When completed switches to true, the server sets completion_date to now in UTC.
+        When completed switches to false, the server clears completion_date to null.
+        completion_date is server managed and cannot be set by clients.
+
+    # --- List Container Model (Used for all list endpoints) ---
+    TaskList:
+      type: object
+      additionalProperties: false
+      required: [data, total, limit, offset]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Task'
+        total:
+          type: integer
+          description: Total number of tasks matching filters before pagination
+        limit:
+          type: integer
+          default: 100
+          description: Maximum number of items returned
+        offset:
+          type: integer
+          default: 0
+          description: Number of items skipped
+
+    Error:
+      type: object
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          description: Machine readable error code
+          examples:
+            - NOT_FOUND
+            - VALIDATION_ERROR
+            - RATE_LIMITED
+        message:
+          type: string
+          description: Human readable error message
+
+    ValidationError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          properties:
+            field_errors:
+              type: array
+              items:
+                type: object
+                required: [field, message]
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+tags:
+  - name: Tasks
+    description: Manage task items, creation, retrieval, updates, and deletion
+
+paths:
+  /tasks:
+    get:
+      tags: [Tasks]
+      summary: List and filter tasks
+      description: |
+        Retrieve a list of task items with filtering, pagination, sorting, and search.
+
+        Parent scope:
+        - If parent_id is omitted, only root-level tasks are returned, same as parent_id="null".
+        - Use a UUID value for parent_id to fetch that parent's direct subtasks.
+
+        Tag filter:
+        - Repeating tag params requires all listed tags to be present on a task.
+        - Tags are case-insensitive and trimmed.
+
+        Overdue:
+        - overdue=true means due_date < now() and completed=false.
+        - Can be combined with due_before and due_after, which further narrow results.
+
+        Sorting:
+        - Nulls sort last for due_date and title.
+        - Ties break by created_at desc.
+
+      parameters:
+        - name: completed
+          in: query
+          schema: { type: boolean }
+          description: Filter by completion status
+        - name: archived
+          in: query
+          schema: { type: boolean }
+          description: Filter by archived status
+        - name: priority
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 99
+          description: Filter by priority level
+        - name: tag
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              minLength: 1
+              maxLength: 64
+          style: form
+          explode: true
+          description: Filter by one or more tags, for example ?tag=work&tag=urgent. All tags must match.
+        - name: parent_id
+          in: query
+          schema:
+            oneOf:
+              - type: string
+                format: uuid
+              - type: string
+                enum: ["null"]
+          description: |
+            Filter by parent. Use a UUID to retrieve subtasks for that parent. Use "null" for root-level tasks. If omitted, treated as "null".
+        - name: search
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 500 }
+          description: Full text search across title and description
+        - name: due_before
+          in: query
+          schema: { type: string, format: date-time }
+          description: Filter tasks due before this date in UTC
+        - name: due_after
+          in: query
+          schema: { type: string, format: date-time }
+          description: Filter tasks due after this date in UTC
+        - name: overdue
+          in: query
+          schema: { type: boolean }
+          description: Filter overdue tasks, due_date in the past and not completed
+        - name: sort_by
+          in: query
+          schema:
+            type: string
+            enum: [created_at, updated_at, title, priority, due_date, completed]
+            default: created_at
+          description: Field to sort by. Nulls sort last for due_date and title. Ties break by created_at desc.
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+          description: Sort order
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+          description: Maximum number of items to return
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of items to skip
+      responses:
+        '200':
+          description: List of tasks
+          headers:
+            ETag:
+              description: Entity tag for the list response if applicable
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskList'
+        '400':
+          description: Bad request, invalid filter or pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '429':
+          description: Too many requests
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds until retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    post:
+      tags: [Tasks]
+      summary: Create a new task
+      description: |
+        Create a new task item. Server managed fields are ignored if sent and may trigger a 422.
+        If completed is true on creation, the server sets completion_date to now in UTC.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskInput'
+            examples:
+              basic:
+                summary: Minimal
+                value:
+                  title: "Buy milk"
+              full:
+                summary: Full example
+                value:
+                  title: "Draft Q4 plan"
+                  description: "Outline scope and owners"
+                  completed: false
+                  archived: false
+                  priority: 50
+                  due_date: "2025-12-01T17:00:00Z"
+                  tags: ["work", "planning"]
+                  metadata: { estimated_hours: 4, assignee: "alice" }
+                  parent_id: null
+      responses:
+        '201':
+          description: Task created
+          headers:
+            Location:
+              description: The URL of the newly created task item
+              schema:
+                type: string
+                format: uri
+                examples:
+                  - /task/v1/tasks/a1b2c3d4-e5f6-7890-1234-567890abcdef
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '429':
+          description: Too many requests
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds until retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{id}:
+    get:
+      tags: [Tasks]
+      summary: Get a task by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Task item
+          headers:
+            ETag:
+              description: Entity tag for the resource
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too many requests
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds until retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    patch:
+      tags: [Tasks]
+      summary: Partially update a task
+      description: |
+        Partially update a task item. The server updates updated_at automatically.
+        completion_date is server managed. When completed becomes true, completion_date is set to now in UTC.
+        When completed becomes false, completion_date is cleared to null.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: If-Unmodified-Since
+          in: header
+          required: false
+          schema: { type: string, format: date-time }
+          description: Only update if the resource has not changed since this timestamp
+        - name: If-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: Only update if the ETag matches
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskUpdate'
+            examples:
+              clearDueDate:
+                summary: Clear due date
+                value: { due_date: null }
+              completeTask:
+                summary: Mark complete
+                value: { completed: true }
+              uncompleteTask:
+                summary: Mark incomplete
+                value: { completed: false }
+      responses:
+        '200':
+          description: Task updated
+          headers:
+            ETag:
+              description: New entity tag for the resource
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '412':
+          description: Precondition failed, the resource changed since the provided validator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '429':
+          description: Too many requests
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds until retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      tags: [Tasks]
+      summary: Delete a task
+      description: |
+        Permanently delete a task. This operation also permanently deletes all of its direct and nested subtasks, a cascading delete.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Task deleted
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too many requests
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds until retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/export:
+    get:
+      tags: [Tasks]
+      summary: Export all tasks
+      description: |
+        Export all task items as a JSON array. Returns complete data including all IDs, timestamps, and relationships.
+        Tasks are ordered with parents before children to facilitate reimport.
+        This endpoint is designed for portability - the export format can be directly imported to another provider.
+      responses:
+        '200':
+          description: Array of all tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+            application/x-ndjson:
+              schema:
+                type: string
+                description: Stream of newline delimited JSON where each line is a Task object
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too many requests
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds until retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/import:
+    post:
+      tags: [Tasks]
+      summary: Import tasks in bulk
+      description: |
+        Import an array of task items, preserving their IDs, timestamps, and relationships.
+        This endpoint accepts the exact format produced by /tasks/export for portability between providers.
+
+        Import behavior:
+        - All provided IDs are preserved (not regenerated)
+        - Parent-child relationships are maintained
+        - Import is atomic - all tasks are created or none are (transaction)
+        - If any ID already exists, the entire import fails with 409 Conflict
+        - Tasks are automatically ordered to create parents before children
+        - All timestamps (created_at, updated_at, completion_date) are preserved as provided
+        - Import is the only flow that accepts server managed fields like id and completion_date, normal create and patch do not
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: validate_only
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Validate the payload and report issues without writing any data
+        - name: on_conflict
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [fail, skip, upsert]
+            default: fail
+          description: Behavior when a provided ID already exists
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/TaskImport'
+            example:
+              - id: "c9a1cbd1-4e89-4e2a-8a1f-8f9a6f7d6b1b"
+                title: "Parent task"
+                completed: false
+                archived: false
+                priority: 50
+                parent_id: null
+                created_at: "2025-11-01T12:00:00Z"
+                updated_at: "2025-11-03T08:30:00Z"
+              - id: "d1b2c3d4-e5f6-7890-1234-567890abcdef"
+                title: "Child task"
+                completed: false
+                archived: false
+                priority: 30
+                parent_id: "c9a1cbd1-4e89-4e2a-8a1f-8f9a6f7d6b1b"
+                created_at: "2025-11-02T14:00:00Z"
+                updated_at: "2025-11-02T14:00:00Z"
+      responses:
+        '201':
+          description: Tasks imported successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imported_count]
+                properties:
+                  imported_count:
+                    type: integer
+                    description: Number of tasks successfully imported
+        '400':
+          description: Bad request, invalid input format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Conflict, one or more IDs already exist
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      conflicting_ids:
+                        type: array
+                        items:
+                          type: string
+                          format: uuid
+                        description: List of IDs that already exist
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '429':
+          description: Too many requests
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds until retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
