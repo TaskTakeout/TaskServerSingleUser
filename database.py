@@ -3,9 +3,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import yaml
+import os
 
 # Load configuration
-with open("config.yaml", "r") as f:
+config_path = "config.yaml" if os.path.exists("config.yaml") else "config.yaml.example"
+with open(config_path, "r") as f:
     config = yaml.safe_load(f)
 
 # Create SQLite engine
