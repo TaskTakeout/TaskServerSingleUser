@@ -5,7 +5,6 @@ from uuid import uuid4
 import json
 
 from sqlalchemy import Column, String, Boolean, Integer, Text, ForeignKey, Index
-from sqlalchemy.orm import relationship
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 from database import Base

@@ -1,23 +1,25 @@
 """FastAPI server for single-user task management API."""
 from datetime import datetime, timezone
-from typing import Optional, List, Annotated
+from typing import Optional, List
 from uuid import uuid4
 import json
 import yaml
+import os
 
 from fastapi import FastAPI, Depends, HTTPException, Header, Query, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_, func
+from sqlalchemy import or_, and_
 
-from database import get_db, init_db, engine
+from database import get_db, init_db
 from models import (
     TaskDB, Task, TaskInput, TaskUpdate, TaskList, TaskImport,
     Error, ValidationError, ImportResponse, ConflictError
 )
 
 # Load configuration
-with open("config.yaml", "r") as f:
+config_path = "config.yaml" if os.path.exists("config.yaml") else "config.yaml.example"
+with open(config_path, "r") as f:
     config = yaml.safe_load(f)
 
 VALID_TOKENS = set(config['auth']['tokens'])
@@ -160,8 +162,8 @@ def list_tasks(
     due_before: Optional[str] = None,
     due_after: Optional[str] = None,
     overdue: Optional[bool] = None,
-    sort_by: str = Query("created_at", regex="^(created_at|updated_at|title|priority|due_date|completed)$"),
-    order: str = Query("desc", regex="^(asc|desc)$"),
+    sort_by: str = Query("created_at", pattern="^(created_at|updated_at|title|priority|due_date|completed)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -283,7 +285,7 @@ def import_tasks(
     tasks: List[TaskImport],
     response: Response,
     validate_only: bool = Query(False),
-    on_conflict: str = Query("fail", regex="^(fail|skip|upsert)$"),
+    on_conflict: str = Query("fail", pattern="^(fail|skip|upsert)$"),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     token: str = Depends(verify_token)

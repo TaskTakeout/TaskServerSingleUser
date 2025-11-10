@@ -24,7 +24,12 @@ A simple, self-hosted task management API server designed for single-user deploy
 pip install -r requirements.txt
 ```
 
-2. Configure authentication tokens in `config.yaml`:
+2. Create your configuration file:
+```bash
+cp config.yaml.example config.yaml
+```
+
+3. Edit `config.yaml` and set your authentication tokens:
 ```yaml
 auth:
   tokens:
@@ -39,7 +44,7 @@ server:
   port: 8000
 ```
 
-3. Run the server:
+4. Run the server:
 ```bash
 python server.py
 ```
@@ -155,7 +160,7 @@ The test suite includes 42 tests covering:
 
 ```
 TaskServerSingleUser/
-├── config.yaml          # Configuration file
+├── config.yaml.example  # Example configuration file
 ├── database.py          # Database connection setup
 ├── models.py            # SQLAlchemy models and Pydantic schemas
 ├── server.py            # FastAPI application and routes
@@ -172,6 +177,6 @@ This server is designed for single-user, self-hosted deployments. Authentication
 - Implementing rate limiting
 - Adding audit logging
 
-## License
+## Configuration
 
-This is a single-user task server with hardcoded authentication. Auth keys are configured in a YAML file, and only a single database is ever created.
+Copy `config.yaml.example` to `config.yaml` and customize the authentication tokens and other settings for your deployment.

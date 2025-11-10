@@ -15,6 +15,9 @@ ENV/
 *.sqlite
 *.sqlite3
 
+# Configuration
+config.yaml
+
 # IDE
 .vscode/
 .idea/
